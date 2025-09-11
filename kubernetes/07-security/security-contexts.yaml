@@ -1,0 +1,322 @@
+# Pod with security context and non-root user
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secure-pod
+  labels:
+    app: secure-app
+spec:
+  # Pod-level security context
+  securityContext:
+    runAsUser: 1000          # Run as non-root user
+    runAsGroup: 3000         # Run with specific group
+    runAsNonRoot: true       # Ensure non-root
+    fsGroup: 2000           # Group for volume ownership
+    seccompProfile:          # Seccomp profile for syscall filtering
+      type: RuntimeDefault
+  
+  containers:
+  - name: secure-container
+    image: nginx:1.21
+    ports:
+    - containerPort: 8080  # Non-privileged port
+    
+    # Container-level security context
+    securityContext:
+      allowPrivilegeEscalation: false    # Prevent privilege escalation
+      readOnlyRootFilesystem: true       # Read-only root filesystem
+      runAsNonRoot: true                 # Ensure non-root
+      capabilities:                      # Drop all capabilities
+        drop:
+        - ALL
+        add:                             # Only add necessary capabilities
+        - NET_BIND_SERVICE               # If binding to privileged ports
+    
+    # Volume mounts for writable areas
+    volumeMounts:
+    - name: tmp-volume
+      mountPath: /tmp
+    - name: var-cache-nginx
+      mountPath: /var/cache/nginx
+    - name: var-run
+      mountPath: /var/run
+    
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "128Mi"
+        cpu: "100m"
+  
+  volumes:
+  - name: tmp-volume
+    emptyDir: {}
+  - name: var-cache-nginx
+    emptyDir: {}
+  - name: var-run
+    emptyDir: {}
+---
+# Deployment with security best practices
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secure-web-app
+  labels:
+    app: secure-web-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: secure-web-app
+  template:
+    metadata:
+      labels:
+        app: secure-web-app
+      annotations:
+        # Security scanning annotations
+        security.alpha.kubernetes.io/sysctls: "net.core.somaxconn=65535"
+    spec:
+      serviceAccountName: secure-app-sa
+      
+      # Security context for all containers
+      securityContext:
+        runAsUser: 65534        # nobody user
+        runAsGroup: 65534       # nobody group
+        runAsNonRoot: true
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+        # Supplemental groups for additional security
+        supplementalGroups: [65534]
+      
+      # Init container with security context
+      initContainers:
+      - name: init-security-setup
+        image: busybox:1.35
+        command: ['sh', '-c']
+        args:
+        - |
+          echo "Setting up secure environment..."
+          # Create necessary directories with proper permissions
+          mkdir -p /app/data /app/logs
+          chown 65534:65534 /app/data /app/logs
+          chmod 755 /app/data /app/logs
+          echo "Security setup completed"
+        securityContext:
+          runAsUser: 0  # Init container may need root for setup
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - CHOWN
+            - DAC_OVERRIDE
+        volumeMounts:
+        - name: app-data
+          mountPath: /app
+      
+      containers:
+      - name: web-app
+        image: nginx:1.21-alpine
+        ports:
+        - containerPort: 8080
+          name: http
+        
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+            # No additional capabilities needed
+        
+        env:
+        - name: NGINX_PORT
+          value: "8080"
+        
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx
+          readOnly: true
+        - name: tmp-volume
+          mountPath: /tmp
+        - name: var-cache-nginx
+          mountPath: /var/cache/nginx
+        - name: var-run
+          mountPath: /var/run
+        - name: app-data
+          mountPath: /app/data
+        
+        # Health probes
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: secure-nginx-config
+      - name: tmp-volume
+        emptyDir:
+          sizeLimit: 100Mi
+      - name: var-cache-nginx
+        emptyDir:
+          sizeLimit: 100Mi
+      - name: var-run
+        emptyDir:
+          sizeLimit: 10Mi
+      - name: app-data
+        emptyDir:
+          sizeLimit: 1Gi
+      
+      # Node selection for security
+      nodeSelector:
+        kubernetes.io/os: linux
+      
+      # Affinity rules for security
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - secure-web-app
+              topologyKey: kubernetes.io/hostname
+      
+      # Tolerations for dedicated security nodes (if any)
+      tolerations:
+      - key: "security"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+---
+# Service Account with minimal permissions
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: secure-app-sa
+  labels:
+    app: secure-web-app
+automountServiceAccountToken: false  # Disable automatic token mounting
+---
+# ConfigMap for secure Nginx configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: secure-nginx-config
+data:
+  nginx.conf: |
+    user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /var/run/nginx.pid;
+    
+    events {
+        worker_connections 1024;
+    }
+    
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+        
+        # Security headers
+        add_header X-Frame-Options DENY always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        
+        # Hide Nginx version
+        server_tokens off;
+        
+        # Logging
+        log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                        '$status $body_bytes_sent "$http_referer" '
+                        '"$http_user_agent" "$http_x_forwarded_for"';
+        
+        access_log /var/log/nginx/access.log main;
+        
+        sendfile on;
+        keepalive_timeout 65;
+        
+        # Rate limiting
+        limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+        limit_conn_zone $binary_remote_addr zone=conn_limit_per_ip:10m;
+        
+        server {
+            listen 8080;
+            server_name _;
+            
+            # Security limits
+            client_max_body_size 1m;
+            limit_req zone=api burst=20 nodelay;
+            limit_conn conn_limit_per_ip 20;
+            
+            location / {
+                root /usr/share/nginx/html;
+                index index.html index.htm;
+                
+                # Security headers for content
+                add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+            }
+            
+            # Health check endpoint
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+            
+            # Deny access to sensitive files
+            location ~ /\. {
+                deny all;
+            }
+            
+            location ~ \.(php|asp|aspx|jsp)$ {
+                deny all;
+            }
+        }
+    }
+---
+# Pod Security Standards are enforced at the namespace level
+# Apply to namespace with labels:
+# 
+# kubectl label namespace <namespace> \
+#   pod-security.kubernetes.io/enforce=restricted \
+#   pod-security.kubernetes.io/audit=restricted \
+#   pod-security.kubernetes.io/warn=restricted
+#
+# For this example, create a secure namespace:
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secure-namespace
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted  
+    pod-security.kubernetes.io/warn: restricted

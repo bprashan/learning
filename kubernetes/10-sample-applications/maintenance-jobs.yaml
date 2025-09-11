@@ -1,0 +1,166 @@
+# Database backup CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: webapp
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: backup-serviceaccount
+          containers:
+          - name: postgres-backup
+            image: postgres:15
+            command:
+            - /bin/bash
+            - -c
+            - |
+              export PGPASSWORD=$POSTGRES_PASSWORD
+              BACKUP_FILE="webapp_backup_$(date +%Y%m%d_%H%M%S).sql"
+              echo "Creating backup: $BACKUP_FILE"
+              
+              pg_dump -h postgres-service -U webapp -d webappdb > /backup/$BACKUP_FILE
+              
+              if [ $? -eq 0 ]; then
+                echo "Backup created successfully: $BACKUP_FILE"
+                gzip /backup/$BACKUP_FILE
+                echo "Backup compressed: $BACKUP_FILE.gz"
+                
+                # Upload to cloud storage (example for GCS)
+                # gsutil cp /backup/$BACKUP_FILE.gz gs://your-backup-bucket/postgres/
+                
+                # Keep only last 7 days of backups
+                find /backup -name "webapp_backup_*.sql.gz" -mtime +7 -delete
+                echo "Old backups cleaned up"
+              else
+                echo "Backup failed!"
+                exit 1
+              fi
+            env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: password
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backup
+          volumes:
+          - name: backup-storage
+            persistentVolumeClaim:
+              claimName: backup-pvc
+          restartPolicy: OnFailure
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+---
+# Backup storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-pvc
+  namespace: webapp
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: standard-rwo
+  resources:
+    requests:
+      storage: 100Gi
+---
+# Backup service account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-serviceaccount
+  namespace: webapp
+---
+# Health check job
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: health-check
+  namespace: webapp
+spec:
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: health-checker
+            image: curlimages/curl:latest
+            command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Running health checks..."
+              
+              # Check frontend
+              if curl -f -s http://frontend-service/health > /dev/null; then
+                echo "✓ Frontend is healthy"
+              else
+                echo "✗ Frontend health check failed"
+              fi
+              
+              # Check backend
+              if curl -f -s http://backend-service:8080/health > /dev/null; then
+                echo "✓ Backend is healthy"
+              else
+                echo "✗ Backend health check failed"
+              fi
+              
+              # Check database connectivity through backend
+              if curl -f -s http://backend-service:8080/db-status > /dev/null; then
+                echo "✓ Database is accessible"
+              else
+                echo "✗ Database connectivity check failed"
+              fi
+              
+              echo "Health check completed"
+          restartPolicy: OnFailure
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+---
+# Resource Quota for the namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: webapp-quota
+  namespace: webapp
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "10"
+    pods: "20"
+    services: "10"
+    secrets: "10"
+    configmaps: "10"
+---
+# Limit Range for pods
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: webapp-limits
+  namespace: webapp
+spec:
+  limits:
+  - default:
+      cpu: "200m"
+      memory: "256Mi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+    type: Container
+  - max:
+      cpu: "2"
+      memory: "2Gi"
+    min:
+      cpu: "50m"
+      memory: "64Mi"
+    type: Container

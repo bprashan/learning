@@ -1,0 +1,71 @@
+# ClusterIP Service (Default)
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  labels:
+    app: backend
+spec:
+  type: ClusterIP  # Default type
+  selector:
+    app: backend
+  ports:
+  - port: 8080          # Service port
+    targetPort: 8080    # Container port
+    protocol: TCP
+    name: http
+---
+# NodePort Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-nodeport
+  labels:
+    app: frontend
+spec:
+  type: NodePort
+  selector:
+    app: frontend
+  ports:
+  - port: 80           # Service port
+    targetPort: 80     # Container port
+    nodePort: 30080    # External port on node (30000-32767)
+    protocol: TCP
+    name: http
+---
+# LoadBalancer Service (for cloud environments)
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-loadbalancer
+  labels:
+    app: web-app
+  annotations:
+    # GKE specific annotations
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "web-backend-config"}'
+spec:
+  type: LoadBalancer
+  selector:
+    app: web-app
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  - port: 443
+    targetPort: 8443
+    protocol: TCP
+    name: https
+---
+# ExternalName Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: external-api-service
+spec:
+  type: ExternalName
+  externalName: api.external-company.com
+  ports:
+  - port: 443
+    protocol: TCP

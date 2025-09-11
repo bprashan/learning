@@ -1,0 +1,365 @@
+# Custom Resource Definition (CRD) Example
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: webapps.example.com
+spec:
+  group: example.com
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              replicas:
+                type: integer
+                minimum: 1
+                maximum: 10
+                description: "Number of replicas for the web application"
+              image:
+                type: string
+                description: "Container image for the web application"
+              port:
+                type: integer
+                minimum: 1
+                maximum: 65535
+                description: "Port number for the web application"
+              resources:
+                type: object
+                properties:
+                  requests:
+                    type: object
+                    properties:
+                      cpu:
+                        type: string
+                        pattern: '^[0-9]+m?$'
+                      memory:
+                        type: string
+                        pattern: '^[0-9]+[MGT]i?$'
+                  limits:
+                    type: object
+                    properties:
+                      cpu:
+                        type: string
+                        pattern: '^[0-9]+m?$'
+                      memory:
+                        type: string
+                        pattern: '^[0-9]+[MGT]i?$'
+            required:
+            - replicas
+            - image
+            - port
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum: ["Pending", "Running", "Failed"]
+              replicas:
+                type: integer
+              readyReplicas:
+                type: integer
+              conditions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                      enum: ["True", "False", "Unknown"]
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+    subresources:
+      status: {}
+      scale:
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+    additionalPrinterColumns:
+    - name: Replicas
+      type: integer
+      jsonPath: .spec.replicas
+    - name: Ready
+      type: integer
+      jsonPath: .status.readyReplicas
+    - name: Phase
+      type: string
+      jsonPath: .status.phase
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: webapps
+    singular: webapp
+    kind: WebApp
+    shortNames:
+    - wa
+---
+# Example Custom Resource using the CRD
+apiVersion: example.com/v1
+kind: WebApp
+metadata:
+  name: my-webapp
+  namespace: default
+spec:
+  replicas: 3
+  image: nginx:1.21
+  port: 80
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+---
+# Advanced CRD with validation and multiple versions
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: databases.db.example.com
+spec:
+  group: db.example.com
+  versions:
+  # Version v1 - current version
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: ["mysql", "postgresql", "mongodb"]
+                description: "Database type"
+              version:
+                type: string
+                description: "Database version"
+              storage:
+                type: object
+                properties:
+                  size:
+                    type: string
+                    pattern: '^[0-9]+Gi$'
+                    description: "Storage size (e.g., 20Gi)"
+                  storageClass:
+                    type: string
+                    description: "Storage class name"
+                required:
+                - size
+              backup:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                    default: false
+                  schedule:
+                    type: string
+                    pattern: '^[0-9\*\-\,\/]+ [0-9\*\-\,\/]+ [0-9\*\-\,\/]+ [0-9\*\-\,\/]+ [0-9\*\-\,\/]+$'
+                    description: "Cron schedule for backups"
+                  retention:
+                    type: integer
+                    minimum: 1
+                    maximum: 365
+                    description: "Backup retention in days"
+              monitoring:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                    default: true
+                  prometheus:
+                    type: boolean
+                    default: true
+            required:
+            - type
+            - version
+            - storage
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum: ["Pending", "Creating", "Ready", "Updating", "Failed"]
+              conditions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                      enum: ["True", "False", "Unknown"]
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+              connection:
+                type: object
+                properties:
+                  host:
+                    type: string
+                  port:
+                    type: integer
+                  database:
+                    type: string
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - name: Type
+      type: string
+      jsonPath: .spec.type
+    - name: Version
+      type: string
+      jsonPath: .spec.version
+    - name: Storage
+      type: string
+      jsonPath: .spec.storage.size
+    - name: Phase
+      type: string
+      jsonPath: .status.phase
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+  
+  # Version v1beta1 - deprecated version
+  - name: v1beta1
+    served: true
+    storage: false
+    deprecated: true
+    deprecationWarning: "db.example.com/v1beta1 is deprecated, use db.example.com/v1 instead"
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              dbType:  # Old field name
+                type: string
+                enum: ["mysql", "postgresql"]
+              dbVersion:  # Old field name
+                type: string
+              storageSize:  # Old field name
+                type: string
+            required:
+            - dbType
+            - dbVersion
+            - storageSize
+          status:
+            type: object
+  
+  scope: Namespaced
+  names:
+    plural: databases
+    singular: database
+    kind: Database
+    shortNames:
+    - db
+  
+  # Conversion between versions
+  conversion:
+    strategy: None  # No conversion needed for this example
+---
+# Example Database Custom Resource
+apiVersion: db.example.com/v1
+kind: Database
+metadata:
+  name: app-database
+  namespace: production
+spec:
+  type: postgresql
+  version: "15"
+  storage:
+    size: 50Gi
+    storageClass: standard-rwo
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"  # Daily at 2 AM
+    retention: 30
+  monitoring:
+    enabled: true
+    prometheus: true
+---
+# CRD with webhook validation
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: applications.app.example.com
+spec:
+  group: app.example.com
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              name:
+                type: string
+                minLength: 3
+                maxLength: 63
+                pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+              replicas:
+                type: integer
+                minimum: 1
+                maximum: 100
+              resources:
+                type: object
+                properties:
+                  cpu:
+                    type: string
+                    pattern: '^[0-9]+m?$'
+                  memory:
+                    type: string
+                    pattern: '^[0-9]+[MGT]i?$'
+              environment:
+                type: string
+                enum: ["development", "staging", "production"]
+            required:
+            - name
+            - replicas
+            - environment
+          status:
+            type: object
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - name: Environment
+      type: string
+      jsonPath: .spec.environment
+    - name: Replicas
+      type: integer
+      jsonPath: .spec.replicas
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: applications
+    singular: application
+    kind: Application

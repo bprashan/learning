@@ -1,0 +1,320 @@
+# PostgreSQL Read Replicas (Slaves) for E-commerce Platform
+# Handles 75% of database operations (read-only queries)
+# Configured with streaming replication from master
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgresql-slave-config
+  namespace: ecommerce-prod
+data:
+  postgresql.conf: |
+    # PostgreSQL Slave Configuration
+    listen_addresses = '*'
+    port = 5432
+    max_connections = 300  # Higher than master for read load
+    shared_buffers = 256MB
+    effective_cache_size = 1GB
+    work_mem = 4MB
+    maintenance_work_mem = 64MB
+    
+    # Read replica specific settings
+    hot_standby = on
+    max_standby_streaming_delay = 30s
+    max_standby_archive_delay = 60s
+    hot_standby_feedback = on
+    
+    # WAL settings for replica
+    wal_level = replica
+    max_wal_senders = 5
+    
+    # Logging
+    log_destination = 'stderr'
+    logging_collector = on
+    log_directory = '/var/log/postgresql'
+    log_filename = 'postgresql-replica-%Y-%m-%d_%H%M%S.log'
+    log_statement = 'ddl'  # Only log DDL on replicas
+    log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+    
+    # Performance tuning for reads
+    checkpoint_timeout = 15min
+    checkpoint_completion_target = 0.9
+    wal_buffers = 16MB
+    default_statistics_target = 100
+    random_page_cost = 1.1  # Assuming SSD storage
+
+  recovery.conf: |
+    # Streaming replication configuration
+    standby_mode = 'on'
+    primary_conninfo = 'host=postgresql-master.ecommerce-prod.svc.cluster.local port=5432 user=replicator password=repl_secret123 application_name=replica'
+    restore_command = 'cp /var/lib/postgresql/archive/%f %p'
+    archive_cleanup_command = 'pg_archivecleanup /var/lib/postgresql/archive %r'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql-read
+  namespace: ecommerce-prod
+  labels:
+    app: postgresql
+    role: slave
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5432
+    targetPort: 5432
+    protocol: TCP
+  selector:
+    app: postgresql
+    role: slave
+
+---
+# Service for load balancing between read replicas
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql-read-lb
+  namespace: ecommerce-prod
+  labels:
+    app: postgresql
+    role: slave
+  annotations:
+    service.alpha.kubernetes.io/tolerate-unready-endpoints: "false"
+spec:
+  type: ClusterIP
+  sessionAffinity: None  # Distribute load evenly
+  ports:
+  - port: 5432
+    targetPort: 5432
+    protocol: TCP
+  selector:
+    app: postgresql
+    role: slave
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgresql-slave
+  namespace: ecommerce-prod
+  labels:
+    app: postgresql
+    role: slave
+spec:
+  serviceName: postgresql-read
+  replicas: 3  # Three read replicas for high availability
+  selector:
+    matchLabels:
+      app: postgresql
+      role: slave
+  template:
+    metadata:
+      labels:
+        app: postgresql
+        role: slave
+    spec:
+      securityContext:
+        fsGroup: 999
+        runAsUser: 999
+        runAsNonRoot: true
+      # Anti-affinity to spread replicas across different nodes
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - postgresql
+                - key: role
+                  operator: In
+                  values:
+                  - slave
+              topologyKey: kubernetes.io/hostname
+        # Prefer different zones
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 50
+            preference:
+              matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values:
+                - us-central1-a
+                - us-central1-b
+                - us-central1-c
+      initContainers:
+      - name: init-replica
+        image: postgres:15-alpine
+        env:
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-master-secret
+              key: replication-password
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -ex
+          # Wait for master to be ready
+          until pg_isready -h postgresql-master.ecommerce-prod.svc.cluster.local -p 5432 -U replicator; do
+            echo "Waiting for master to be ready..."
+            sleep 2
+          done
+          
+          # Check if data directory exists and is not empty
+          if [ -s "$PGDATA/PG_VERSION" ]; then
+            echo "Data directory exists, skipping base backup"
+          else
+            echo "Taking base backup from master..."
+            rm -rf $PGDATA/*
+            pg_basebackup -h postgresql-master.ecommerce-prod.svc.cluster.local -D $PGDATA -U replicator -v -P -W
+            echo "Base backup completed"
+          fi
+        volumeMounts:
+        - name: postgresql-slave-storage
+          mountPath: /var/lib/postgresql/data
+        env:
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+      containers:
+      - name: postgresql
+        image: postgres:15-alpine
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_DB
+          value: "ecommerce_db"
+        - name: POSTGRES_USER
+          value: "postgres"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-master-secret
+              key: postgres-password
+        - name: PGUSER
+          value: "postgres"
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        - name: POSTGRES_MASTER_SERVICE
+          value: "postgresql-master.ecommerce-prod.svc.cluster.local"
+        - name: POSTGRES_REPLICATION_USER
+          value: "replicator"
+        - name: POSTGRES_REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-master-secret
+              key: replication-password
+        command:
+        - /bin/bash
+        - -c
+        - |
+          # Create recovery configuration
+          cat > $PGDATA/postgresql.auto.conf << EOF
+          # Replica configuration
+          hot_standby = on
+          primary_conninfo = 'host=postgresql-master.ecommerce-prod.svc.cluster.local port=5432 user=replicator password=$POSTGRES_REPLICATION_PASSWORD application_name=replica-$(hostname)'
+          EOF
+          
+          # Create standby signal file
+          touch $PGDATA/standby.signal
+          
+          # Start PostgreSQL
+          exec postgres -c config_file=/etc/postgresql/postgresql.conf
+        livenessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - exec pg_isready -U postgres -h 127.0.0.1 -p 5432
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 6
+        readinessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - exec pg_isready -U postgres -h 127.0.0.1 -p 5432
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "300m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: postgresql-slave-storage
+          mountPath: /var/lib/postgresql/data
+        - name: postgresql-config
+          mountPath: /etc/postgresql/postgresql.conf
+          subPath: postgresql.conf
+      volumes:
+      - name: postgresql-config
+        configMap:
+          name: postgresql-slave-config
+  volumeClaimTemplates:
+  - metadata:
+      name: postgresql-slave-storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 100Gi
+
+---
+# PodDisruptionBudget for read replicas
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgresql-slave-pdb
+  namespace: ecommerce-prod
+spec:
+  minAvailable: 2  # Keep at least 2 replicas available
+  selector:
+    matchLabels:
+      app: postgresql
+      role: slave
+
+---
+# HorizontalPodAutoscaler for read replicas
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: postgresql-slave-hpa
+  namespace: ecommerce-prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: postgresql-slave
+  minReplicas: 3
+  maxReplicas: 6
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80

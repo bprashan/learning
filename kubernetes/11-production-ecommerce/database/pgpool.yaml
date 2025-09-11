@@ -1,0 +1,333 @@
+# PgPool-II Connection Pooler and Load Balancer
+# Handles automatic read/write splitting and connection pooling
+# Routes write operations to master, read operations to slaves
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgpool-config
+  namespace: ecommerce-prod
+data:
+  pgpool.conf: |
+    # PgPool-II Configuration for E-commerce Platform
+    
+    # Connection settings
+    listen_addresses = '*'
+    port = 5432
+    socket_dir = '/tmp'
+    
+    # Backend connections (Master + 3 Read Replicas)
+    backend_hostname0 = 'postgresql-master.ecommerce-prod.svc.cluster.local'
+    backend_port0 = 5432
+    backend_weight0 = 0  # No reads on master
+    backend_data_directory0 = '/var/lib/postgresql/data'
+    backend_flag0 = 'ALWAYS_PRIMARY|DISALLOW_TO_FAILOVER'
+    backend_application_name0 = 'pgpool_master'
+    
+    backend_hostname1 = 'postgresql-slave-0.postgresql-read.ecommerce-prod.svc.cluster.local'
+    backend_port1 = 5432
+    backend_weight1 = 1
+    backend_data_directory1 = '/var/lib/postgresql/data'
+    backend_flag1 = 'ALLOW_TO_FAILOVER'
+    backend_application_name1 = 'pgpool_slave1'
+    
+    backend_hostname2 = 'postgresql-slave-1.postgresql-read.ecommerce-prod.svc.cluster.local'
+    backend_port2 = 5432
+    backend_weight2 = 1
+    backend_data_directory2 = '/var/lib/postgresql/data'
+    backend_flag2 = 'ALLOW_TO_FAILOVER'
+    backend_application_name2 = 'pgpool_slave2'
+    
+    backend_hostname3 = 'postgresql-slave-2.postgresql-read.ecommerce-prod.svc.cluster.local'
+    backend_port3 = 5432
+    backend_weight3 = 1
+    backend_data_directory3 = '/var/lib/postgresql/data'
+    backend_flag3 = 'ALLOW_TO_FAILOVER'
+    backend_application_name3 = 'pgpool_slave3'
+    
+    # Authentication
+    enable_pool_hba = on
+    pool_passwd = 'pool_passwd'
+    
+    # Process management
+    num_init_children = 50
+    max_pool = 4
+    child_life_time = 300
+    child_max_connections = 0
+    connection_life_time = 0
+    client_idle_limit = 0
+    
+    # Load balancing
+    load_balance_mode = on
+    ignore_leading_white_space = on
+    read_only_function_list = ''
+    write_function_list = ''
+    
+    # Master/slave mode
+    master_slave_mode = on
+    master_slave_sub_mode = 'stream'
+    sr_check_period = 10
+    sr_check_user = 'replicator'
+    sr_check_password = 'repl_secret123'
+    sr_check_database = 'ecommerce_db'
+    delay_threshold = 100000000  # 100ms in microseconds
+    
+    # Health checking
+    health_check_period = 20
+    health_check_timeout = 10
+    health_check_user = 'postgres'
+    health_check_password = 'pg_super_secure'
+    health_check_database = 'ecommerce_db'
+    health_check_max_retries = 3
+    health_check_retry_delay = 1
+    connect_timeout = 10000
+    
+    # Failover and failback
+    failover_command = ''
+    failback_command = ''
+    failover_on_backend_error = on
+    search_primary_node_timeout = 300
+    
+    # Online recovery (not used in streaming replication)
+    recovery_user = 'postgres'
+    recovery_password = 'pg_super_secure'
+    recovery_1st_stage_command = ''
+    recovery_2nd_stage_command = ''
+    recovery_timeout = 90
+    
+    # Watchdog (disabled for simplicity)
+    use_watchdog = off
+    
+    # Connection pooling
+    connection_cache = on
+    reset_query_list = 'ABORT; DISCARD ALL'
+    
+    # Logging
+    log_destination = 'stderr'
+    log_line_prefix = '%t: pid %p: '
+    log_connections = off
+    log_hostname = off
+    log_statement = off
+    log_per_node_statement = off
+    log_client_messages = off
+    syslog_facility = 'LOCAL0'
+    syslog_ident = 'pgpool'
+    
+    # Memory settings
+    memqcache_method = 'shmem'
+    memqcache_memcached_host = 'localhost'
+    memqcache_memcached_port = 11211
+    memqcache_total_size = 67108864  # 64MB
+    memqcache_max_num_cache = 1000000
+    memqcache_expire = 0
+    memqcache_auto_cache_invalidation = on
+    memqcache_maxcache = 409600  # 400KB
+    memqcache_cache_block_size = 1048576  # 1MB
+    
+    # Statement level load balancing
+    black_function_list = 'currval,lastval,nextval,setval'
+    black_query_pattern_list = ''
+    
+    # SSL settings
+    ssl = off
+
+  pool_hba.conf: |
+    # PgPool-II Client Authentication Configuration
+    # TYPE  DATABASE    USER        CIDR-ADDRESS          METHOD
+    local   all         all                               trust
+    host    all         all         127.0.0.1/32          md5
+    host    all         all         ::1/128               md5
+    host    all         all         0.0.0.0/0             md5
+
+  pool_passwd: |
+    postgres:md5d6d70e962543d6f2aaa127361a9f1a9b
+    replicator:md5c31c894b8f19090e4b2b9796e7e82bd4
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgpool
+  namespace: ecommerce-prod
+  labels:
+    app: pgpool
+    component: database-proxy
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5432
+    targetPort: 5432
+    protocol: TCP
+    name: postgres
+  - port: 9999
+    targetPort: 9999
+    protocol: TCP
+    name: pcp
+  selector:
+    app: pgpool
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgpool
+  namespace: ecommerce-prod
+  labels:
+    app: pgpool
+    component: database-proxy
+spec:
+  replicas: 2  # High availability for connection pooler
+  selector:
+    matchLabels:
+      app: pgpool
+  template:
+    metadata:
+      labels:
+        app: pgpool
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - pgpool
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: pgpool
+        image: pgpool/pgpool:4.4
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5432
+          name: postgres
+        - containerPort: 9999
+          name: pcp
+        env:
+        - name: POSTGRES_USERNAME
+          value: "postgres"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-master-secret
+              key: postgres-password
+        livenessProbe:
+          tcpSocket:
+            port: 5432
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        readinessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - "pg_isready -h localhost -p 5432"
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: pgpool-config
+          mountPath: /usr/local/etc/pgpool.conf
+          subPath: pgpool.conf
+        - name: pgpool-config
+          mountPath: /usr/local/etc/pool_hba.conf
+          subPath: pool_hba.conf
+        - name: pgpool-config
+          mountPath: /usr/local/etc/pool_passwd
+          subPath: pool_passwd
+      volumes:
+      - name: pgpool-config
+        configMap:
+          name: pgpool-config
+
+---
+# Service for applications to connect to
+apiVersion: v1
+kind: Service
+metadata:
+  name: database
+  namespace: ecommerce-prod
+  labels:
+    app: database-service
+    component: connection-router
+  annotations:
+    service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5432
+    targetPort: 5432
+    protocol: TCP
+  selector:
+    app: pgpool
+
+---
+# PodDisruptionBudget for pgpool
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pgpool-pdb
+  namespace: ecommerce-prod
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: pgpool
+
+---
+# HorizontalPodAutoscaler for pgpool
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pgpool-hpa
+  namespace: ecommerce-prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: pgpool
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60

@@ -1,0 +1,85 @@
+# Simple Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-processing-job
+  labels:
+    app: data-processor
+spec:
+  # Number of successful completions needed
+  completions: 1
+  # Number of pods running in parallel
+  parallelism: 1
+  # Retry limit for failed pods
+  backoffLimit: 3
+  # Clean up finished jobs automatically
+  ttlSecondsAfterFinished: 3600  # 1 hour
+  
+  template:
+    metadata:
+      labels:
+        app: data-processor
+    spec:
+      restartPolicy: Never  # Jobs must have Never or OnFailure
+      containers:
+      - name: processor
+        image: busybox:1.35
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            echo "Starting data processing job..."
+            echo "Processing file 1/10..."
+            sleep 10
+            echo "Processing file 5/10..."
+            sleep 15
+            echo "Processing file 10/10..."
+            sleep 5
+            echo "Data processing completed successfully!"
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+---
+# Parallel Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: parallel-processing-job
+  labels:
+    app: parallel-processor
+spec:
+  completions: 10      # Total successful completions needed
+  parallelism: 3       # Run 3 pods in parallel
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 7200  # 2 hours
+  
+  template:
+    metadata:
+      labels:
+        app: parallel-processor
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: worker
+        image: busybox:1.35
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            TASK_ID=$RANDOM
+            echo "Worker starting task ID: $TASK_ID"
+            PROCESSING_TIME=$((10 + $RANDOM % 20))
+            echo "Processing for $PROCESSING_TIME seconds..."
+            sleep $PROCESSING_TIME
+            echo "Task ID $TASK_ID completed!"
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "50m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"

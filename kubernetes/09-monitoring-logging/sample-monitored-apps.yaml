@@ -1,0 +1,242 @@
+# Sample application with monitoring annotations
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: monitored-app
+  labels:
+    app: monitored-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: monitored-app
+  template:
+    metadata:
+      labels:
+        app: monitored-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: app
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+          name: http
+        - containerPort: 8080
+          name: metrics
+        env:
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: ENABLE_METRICS
+          value: "true"
+        
+        # Configure structured logging
+        volumeMounts:
+        - name: log-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      
+      # Sidecar container for metrics export
+      - name: metrics-exporter
+        image: nginx/nginx-prometheus-exporter:0.10.0
+        args:
+        - "-nginx.scrape-uri=http://localhost:8080/nginx_status"
+        ports:
+        - containerPort: 9113
+          name: metrics
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "25m"
+          limits:
+            memory: "64Mi"
+            cpu: "50m"
+      
+      volumes:
+      - name: log-config
+        configMap:
+          name: nginx-log-config
+---
+# Service with monitoring labels
+apiVersion: v1
+kind: Service
+metadata:
+  name: monitored-app-service
+  labels:
+    app: monitored-app
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9113"
+spec:
+  selector:
+    app: monitored-app
+  ports:
+  - port: 80
+    targetPort: 80
+    name: http
+  - port: 9113
+    targetPort: 9113
+    name: metrics
+---
+# Nginx configuration with structured logging
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-log-config
+data:
+  nginx.conf: |
+    user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /var/run/nginx.pid;
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+
+        # Structured JSON logging format
+        log_format json_combined escape=json
+        '{'
+          '"time_local":"$time_local",'
+          '"remote_addr":"$remote_addr",'
+          '"remote_user":"$remote_user",'
+          '"request":"$request",'
+          '"status": "$status",'
+          '"body_bytes_sent":"$body_bytes_sent",'
+          '"request_time":"$request_time",'
+          '"http_referrer":"$http_referer",'
+          '"http_user_agent":"$http_user_agent",'
+          '"http_x_forwarded_for":"$http_x_forwarded_for",'
+          '"upstream_response_time":"$upstream_response_time"'
+        '}';
+
+        access_log /var/log/nginx/access.log json_combined;
+
+        sendfile on;
+        keepalive_timeout 65;
+
+        # Status page for metrics
+        server {
+            listen 8080;
+            location /nginx_status {
+                stub_status;
+                access_log off;
+            }
+        }
+
+        server {
+            listen 80;
+            server_name localhost;
+
+            location / {
+                root /usr/share/nginx/html;
+                index index.html index.htm;
+            }
+
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+        }
+    }
+---
+# Application with custom metrics endpoint
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: custom-metrics-app
+  labels:
+    app: custom-metrics-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: custom-metrics-app
+  template:
+    metadata:
+      labels:
+        app: custom-metrics-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.35
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            # Simple HTTP server with metrics endpoint
+            mkdir -p /tmp/www
+            
+            # Create a simple metrics endpoint
+            cat > /tmp/www/metrics << 'EOF'
+            # HELP http_requests_total Total number of HTTP requests
+            # TYPE http_requests_total counter
+            http_requests_total{method="GET",status="200"} 1027
+            http_requests_total{method="POST",status="200"} 3
+            http_requests_total{method="GET",status="404"} 2
+            
+            # HELP http_request_duration_seconds HTTP request duration
+            # TYPE http_request_duration_seconds histogram
+            http_request_duration_seconds_bucket{le="0.1"} 8
+            http_request_duration_seconds_bucket{le="0.5"} 10
+            http_request_duration_seconds_bucket{le="1.0"} 10
+            http_request_duration_seconds_bucket{le="+Inf"} 10
+            http_request_duration_seconds_sum 2.3
+            http_request_duration_seconds_count 10
+            
+            # HELP app_version Application version info
+            # TYPE app_version gauge
+            app_version{version="1.0.0",environment="production"} 1
+            EOF
+            
+            # Start simple HTTP server
+            while true; do
+              echo -e "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n$(cat /tmp/www/metrics)" | nc -l -p 9090
+            done
+        ports:
+        - containerPort: 9090
+          name: metrics
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "25m"
+          limits:
+            memory: "64Mi"
+            cpu: "50m"
+# Note: ServiceMonitor is specific to Prometheus Operator
+# If using Prometheus Operator, create ServiceMonitor resources
+# to automatically discover and scrape application metrics

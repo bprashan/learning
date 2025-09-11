@@ -1,0 +1,67 @@
+# Development namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: development
+  labels:
+    environment: dev
+    team: backend
+  annotations:
+    description: "Development environment for backend team"
+---
+# Production namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    environment: prod
+    team: backend
+  annotations:
+    description: "Production environment for backend team"
+---
+# Pod in development namespace
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dev-app
+  namespace: development
+  labels:
+    app: web-server
+    environment: dev
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.21
+    ports:
+    - containerPort: 80
+    resources:
+      requests:
+        memory: "32Mi"
+        cpu: "25m"
+      limits:
+        memory: "64Mi"
+        cpu: "50m"
+---
+# Pod in production namespace
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prod-app
+  namespace: production
+  labels:
+    app: web-server
+    environment: prod
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.21
+    ports:
+    - containerPort: 80
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "128Mi"
+        cpu: "100m"

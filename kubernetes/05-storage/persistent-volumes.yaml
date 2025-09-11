@@ -1,0 +1,137 @@
+# Storage Class for GKE
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast-ssd
+  labels:
+    storage-type: ssd
+provisioner: kubernetes.io/gce-pd
+parameters:
+  type: pd-ssd
+  replication-type: none
+  zones: us-central1-a,us-central1-b
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+# Persistent Volume (Static Provisioning)
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: manual-pv
+  labels:
+    type: manual
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  gcePersistentDisk:
+    pdName: manual-disk-1
+    fsType: ext4
+---
+# Persistent Volume Claim (Dynamic Provisioning)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: web-app-pvc
+  labels:
+    app: web-app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard-rwo  # GKE default storage class
+  resources:
+    requests:
+      storage: 20Gi
+---
+# Persistent Volume Claim with fast SSD
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: database-pvc
+  labels:
+    app: database
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: fast-ssd
+  resources:
+    requests:
+      storage: 50Gi
+---
+# Pod using PVC
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-pod-example
+  labels:
+    app: storage-demo
+spec:
+  containers:
+  - name: web-server
+    image: nginx:1.21
+    ports:
+    - containerPort: 80
+    volumeMounts:
+    - name: web-storage
+      mountPath: /usr/share/nginx/html
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "100m"
+      limits:
+        memory: "256Mi"
+        cpu: "200m"
+  
+  volumes:
+  - name: web-storage
+    persistentVolumeClaim:
+      claimName: web-app-pvc
+---
+# Deployment using PVC (shared storage)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shared-storage-app
+  labels:
+    app: shared-storage
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: shared-storage
+  template:
+    metadata:
+      labels:
+        app: shared-storage
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.35
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            while true; do
+              echo "$(hostname): $(date)" >> /shared-data/access.log
+              tail -n 10 /shared-data/access.log
+              sleep 30
+            done
+        volumeMounts:
+        - name: shared-volume
+          mountPath: /shared-data
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+      
+      volumes:
+      - name: shared-volume
+        persistentVolumeClaim:
+          claimName: web-app-pvc
