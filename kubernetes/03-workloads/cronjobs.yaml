@@ -1,0 +1,155 @@
+# Daily backup CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: daily-backup
+  labels:
+    app: backup-service
+spec:
+  # Run every day at 2 AM
+  schedule: "0 2 * * *"
+  # Keep last 3 successful jobs
+  successfulJobsHistoryLimit: 3
+  # Keep last 1 failed job for debugging
+  failedJobsHistoryLimit: 1
+  # Suspend cron job if needed
+  suspend: false
+  # Concurrency policy: Allow, Forbid, Replace
+  concurrencyPolicy: Forbid
+  # Deadline for starting the job if it misses scheduled time
+  startingDeadlineSeconds: 300
+  
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400  # 24 hours
+      template:
+        metadata:
+          labels:
+            app: backup-service
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: backup
+            image: google/cloud-sdk:alpine
+            command: ["/bin/sh"]
+            args:
+              - -c
+              - |
+                echo "Starting daily backup at $(date)"
+                echo "Connecting to database..."
+                sleep 5
+                echo "Creating backup..."
+                sleep 30
+                echo "Uploading to cloud storage..."
+                sleep 15
+                echo "Backup completed successfully at $(date)"
+            env:
+            - name: BACKUP_LOCATION
+              value: "gs://my-backup-bucket"
+            - name: DB_HOST
+              value: "mysql-service"
+            resources:
+              requests:
+                memory: "128Mi"
+                cpu: "100m"
+              limits:
+                memory: "256Mi"
+                cpu: "200m"
+---
+# Report generation - every weekday at 9 AM
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: weekly-report
+  labels:
+    app: reporting-service
+spec:
+  # Run Monday to Friday at 9 AM
+  schedule: "0 9 * * 1-5"
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 2
+  concurrencyPolicy: Replace
+  
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        metadata:
+          labels:
+            app: reporting-service
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: report-generator
+            image: python:3.9-slim
+            command: ["python"]
+            args:
+              - -c
+              - |
+                import time
+                import datetime
+                print(f"Generating weekly report for {datetime.date.today()}")
+                print("Fetching data from analytics service...")
+                time.sleep(10)
+                print("Processing metrics...")
+                time.sleep(20)
+                print("Generating charts and graphs...")
+                time.sleep(15)
+                print("Sending report via email...")
+                time.sleep(5)
+                print("Weekly report generated successfully!")
+            env:
+            - name: ANALYTICS_API
+              value: "http://analytics-service:8080"
+            - name: EMAIL_SERVICE
+              value: "http://email-service:8080"
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "200m"
+              limits:
+                memory: "512Mi"
+                cpu: "500m"
+---
+# Cleanup job - every 15 minutes
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: temp-cleanup
+  labels:
+    app: cleanup-service
+spec:
+  # Run every 15 minutes
+  schedule: "*/15 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  concurrencyPolicy: Allow
+  
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: cleanup-service
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: cleanup
+            image: busybox:1.35
+            command: ["/bin/sh"]
+            args:
+              - -c
+              - |
+                echo "Starting cleanup at $(date)"
+                echo "Cleaning temporary files..."
+                echo "Removing old log files..."
+                echo "Clearing cache..."
+                echo "Cleanup completed at $(date)"
+            resources:
+              requests:
+                memory: "32Mi"
+                cpu: "25m"
+              limits:
+                memory: "64Mi"
+                cpu: "50m"

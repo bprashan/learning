@@ -1,0 +1,117 @@
+# Application ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  labels:
+    app: web-app
+data:
+  # Simple key-value pairs
+  database.host: "mysql-service.default.svc.cluster.local"
+  database.port: "3306"
+  database.name: "appdb"
+  redis.host: "redis-service"
+  redis.port: "6379"
+  log.level: "INFO"
+  
+  # Configuration file content
+  app.properties: |
+    # Application Configuration
+    server.port=8080
+    server.servlet.context-path=/api
+    
+    # Database Configuration
+    spring.datasource.url=jdbc:mysql://mysql-service:3306/appdb
+    spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+    spring.jpa.hibernate.ddl-auto=update
+    spring.jpa.show-sql=true
+    
+    # Redis Configuration
+    spring.redis.host=redis-service
+    spring.redis.port=6379
+    spring.redis.timeout=2000ms
+    
+    # Logging Configuration
+    logging.level.com.example=INFO
+    logging.pattern.console=%d{yyyy-MM-dd HH:mm:ss} - %msg%n
+  
+  # Nginx configuration
+  nginx.conf: |
+    user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log;
+    pid /run/nginx.pid;
+    
+    events {
+        worker_connections 1024;
+    }
+    
+    http {
+        log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                        '$status $body_bytes_sent "$http_referer" '
+                        '"$http_user_agent" "$http_x_forwarded_for"';
+        
+        access_log /var/log/nginx/access.log main;
+        
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        keepalive_timeout 65;
+        types_hash_max_size 2048;
+        
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+        
+        server {
+            listen 80;
+            server_name localhost;
+            
+            location / {
+                root /usr/share/nginx/html;
+                index index.html index.htm;
+            }
+            
+            location /api/ {
+                proxy_pass http://backend-service:8080/;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+            
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+        }
+    }
+---
+# Environment-specific ConfigMaps
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dev-config
+  namespace: development
+  labels:
+    environment: development
+data:
+  environment: "development"
+  debug: "true"
+  database.pool.size: "5"
+  cache.ttl: "300"
+  external.api.url: "https://api-dev.example.com"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prod-config
+  namespace: production
+  labels:
+    environment: production
+data:
+  environment: "production"
+  debug: "false"
+  database.pool.size: "20"
+  cache.ttl: "3600"
+  external.api.url: "https://api.example.com"

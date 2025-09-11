@@ -1,0 +1,261 @@
+pipeline {
+    agent {
+        label 'bkc'
+    }
+    
+    environment {
+        // Build directories
+        BUILD_DIR = "${WORKSPACE}/buildtop"
+        CLONE_DIR = "${WORKSPACE}/applications.security.tdx.solutions-and-tools.linux-bkc"
+        ARTIFACTS_DIR = "${WORKSPACE}/artifacts"
+        // Repository configuration
+        REPO_URL = "https://github.com/intel-innersource/applications.security.tdx.solutions-and-tools.linux-bkc.git"
+        REPO_BRANCH = "6.2.0-emr"
+        // Build configuration
+        KERNEL_CONFIG_SOURCE = "${CLONE_DIR}/rpmtools/emr-config"
+        MAKE_JOBS = "200"
+        // RPM package name
+        PACKAGE_NAME = "kernel-emr-bkc"
+    }
+    
+    stages {
+        stage('Initialize Build Environment') {
+            steps {
+                echo "🚀 Starting BKC Kernel Build Pipeline"
+                echo "Repository: ${REPO_URL}"
+                echo "Branch: ${REPO_BRANCH}"
+                echo "Config Source: ${KERNEL_CONFIG_SOURCE}"
+                cleanWs()
+                sh """
+                    # Create RPM build directory structure
+                    mkdir -p ${BUILD_DIR}/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+                    # Configure RPM build for parallel compilation
+                    echo '%__make /usr/bin/make -j ${MAKE_JOBS}' > ~/.rpmmacros
+                    echo "✅ Build environment initialized"
+                """
+            }
+        }
+        
+        stage('Clone Source Code') {
+            steps {
+                echo "📥 Cloning BKC source repository..."
+                dir("${CLONE_DIR}") {
+                    git branch: "${REPO_BRANCH}", credentialsId: 'credentials', url: "${REPO_URL}"
+                    sh """
+                        echo "✅ Repository cloned successfully"
+                        echo "📁 Repository contents:"
+                        ls -la
+                    """
+                }
+            }
+        }
+        
+        stage('Prepare Build Files') {
+            steps {
+                echo "📦 Preparing RPM build files..."
+                sh """
+                    cd ${CLONE_DIR}/rpmtools
+                    
+                    # Stash the kernel config file to protect it from mv operation
+                    if [ -f "emr-config" ]; then
+                        echo "🔒 Stashing kernel config file: emr-config"
+                        cp emr-config ${WORKSPACE}/emr-config.stash
+                        rm emr-config
+                        echo "✅ Kernel config file stashed and removed from rpmtools"
+                    else
+                        echo "⚠️ Warning: emr-config file not found in rpmtools directory"
+                    fi
+                    
+                    # Move spec file and sources to appropriate directories
+                    mv ${PACKAGE_NAME}.spec ${BUILD_DIR}/SPECS/
+                    mv * ${BUILD_DIR}/SOURCES/ 2>/dev/null || true
+                    
+                    # Create source tarball
+                    cd ${WORKSPACE}
+                    tar -czf applications.security.tdx.solutions-and-tools.linux-bkc.tar.gz \
+                        applications.security.tdx.solutions-and-tools.linux-bkc
+                    cp applications.security.tdx.solutions-and-tools.linux-bkc.tar.gz ${BUILD_DIR}/SOURCES/
+                    
+                    echo "✅ Build files prepared"
+                    echo "📄 SPECS contents: \$(ls ${BUILD_DIR}/SPECS/)"
+                    echo "📁 SOURCES count: \$(ls ${BUILD_DIR}/SOURCES/ | wc -l) files"
+                """
+            }
+        }
+        
+        stage('RPM Build Preparation') {
+            steps {
+                echo "🔧 Preparing RPM build environment..."
+                sh """
+                    cd ${BUILD_DIR}/SPECS
+                    rpmbuild --define "_topdir ${BUILD_DIR}" \
+                             -bp \
+                             --target=\$(uname -m) \
+                             ${PACKAGE_NAME}.spec
+                    echo "✅ RPM preparation completed"
+                    echo "📁 Build directory contents:"
+                    ls -la ${BUILD_DIR}/BUILD/
+                """
+            }
+        }
+        
+        stage('Configure Kernel') {
+            steps {
+                echo "⚙️ Configuring kernel build..."
+                sh """
+                    # Restore the stashed kernel config file
+                    if [ -f "${WORKSPACE}/emr-config.stash" ]; then
+                        echo "🔓 Restoring kernel config file from stash"
+                        cp ${WORKSPACE}/emr-config.stash ${CLONE_DIR}/rpmtools/emr-config
+                        echo "✅ Kernel config file restored to: ${CLONE_DIR}/rpmtools/emr-config"
+                    else
+                        echo "❌ ERROR: Stashed kernel config file not found at ${WORKSPACE}/emr-config.stash"
+                        exit 1
+                    fi
+                    
+                    # Navigate to kernel source directory
+                    cd ${BUILD_DIR}/BUILD/${PACKAGE_NAME}/linux-6.2.0-emr.bkc.*
+                    # Validate and copy kernel configuration
+                    if [ -f "${KERNEL_CONFIG_SOURCE}" ]; then
+                        echo "✅ Using kernel config: ${KERNEL_CONFIG_SOURCE}"
+                        cp ${KERNEL_CONFIG_SOURCE} .config
+                    else
+                        echo "❌ ERROR: Kernel config not found at ${KERNEL_CONFIG_SOURCE}"
+                        echo "Build cannot proceed without proper kernel configuration"
+                        exit 1
+                    fi
+                    # Update configuration for current environment
+                    make oldconfig
+                    # Add architecture marker
+                    sed -i '1i# x86_64' .config
+                    # Prepare config files for packaging
+                    mkdir -p configs
+                    cp .config configs/kernel-*-\$(uname -m).config
+                    cp configs/* ${BUILD_DIR}/SOURCES/
+                    echo "✅ Kernel configuration completed"
+                    echo "📄 Config files: \$(ls configs/)"
+                """
+            }
+        }
+        
+        stage('Build Kernel RPM') {
+            steps {
+                echo "🔨 Building kernel RPM package..."
+                sh """
+                    cd ${BUILD_DIR}/SPECS
+                    # Build RPM package with comprehensive logging
+                    echo "Starting RPM build at \$(date)"
+                    rpmbuild --define "_topdir ${BUILD_DIR}" \
+                             -bb \
+                             --target=\$(uname -m) \
+                             ${PACKAGE_NAME}.spec \
+                             2> build-err.log | tee build-out.log
+                    # Validate build success
+                    if [ \${PIPESTATUS[0]} -eq 0 ]; then
+                        echo "✅ RPM build completed successfully at \$(date)"
+                        echo "📦 Built packages:"
+                        find ${BUILD_DIR}/RPMS -name "*.rpm" -type f -exec basename {} \\;
+                    else
+                        echo "❌ RPM build failed!"
+                        echo "📄 Error log:"
+                        cat build-err.log
+                        exit 1
+                    fi
+                """
+            }
+        }
+        
+        stage('Archive Build Artifacts') {
+            steps {
+                echo "📚 Archiving build artifacts..."
+                
+                sh """
+                    # Create artifacts directory
+                    mkdir -p ${ARTIFACTS_DIR}
+                    
+                    # Copy specific RPM packages only
+                    echo "🔍 Searching for specific RPM packages..."
+                    
+                    # Copy kernel-emr-bkc-core package (exclude debuginfo, devel, etc.)
+                    find ${BUILD_DIR}/RPMS -name "kernel-emr-bkc-core-*.rpm" -type f ! -name "*debuginfo*" ! -name "*devel*" -exec cp {} ${ARTIFACTS_DIR}/ \\;
+                    
+                    # Copy all kernel-emr-bkc-modules packages (including extra, internal)
+                    find ${BUILD_DIR}/RPMS -name "kernel-emr-bkc-modules-*.rpm" -type f -exec cp {} ${ARTIFACTS_DIR}/ \\;
+                    
+                    # Copy main kernel-emr-bkc package (exclude all variants)
+                    find ${BUILD_DIR}/RPMS -name "kernel-emr-bkc-*.rpm" -type f ! -name "*core*" ! -name "*modules*" ! -name "*debuginfo*" ! -name "*devel*" ! -name "*selftests*" -exec cp {} ${ARTIFACTS_DIR}/ \\;
+                    
+                    # Copy kernel-headers package
+                    find ${BUILD_DIR}/RPMS -name "kernel-headers-*.rpm" -type f -exec cp {} ${ARTIFACTS_DIR}/ \\;
+                    
+                    # Copy build logs
+                    cp ${BUILD_DIR}/SPECS/build-*.log ${ARTIFACTS_DIR}/
+                    
+                    echo "✅ Specific artifacts archived successfully"
+                    echo "📁 Archived artifacts:"
+                    ls -la ${ARTIFACTS_DIR}/
+                    
+                    echo "📦 RPM packages archived:"
+                    ls -1 ${ARTIFACTS_DIR}/*.rpm 2>/dev/null || echo "No RPM packages found"
+                """
+                
+                archiveArtifacts artifacts: 'artifacts/*', 
+                               allowEmptyArchive: false, 
+                               fingerprint: true
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo "🏁 Build pipeline completed"
+            echo "📊 Build executed on: ${env.NODE_NAME}"
+            echo "⏱️ Build duration: ${currentBuild.durationString}"
+        }
+        success {
+            echo "🎉 BKC kernel build completed successfully!"
+            sh """
+                echo ""
+                echo "======================================"
+                echo "         BUILD SUMMARY"
+                echo "======================================"
+                echo "📦 Built RPM Packages:"
+                echo "--------------------------------------"
+                
+                find ${BUILD_DIR}/RPMS -name "*.rpm" -type f | while read rpm; do
+                    echo "  📄 \$(basename \$rpm)"
+                    echo "     Size: \$(du -h \$rpm | cut -f1)"
+                    echo "     Path: \$rpm"
+                    echo ""
+                done
+                
+                echo "======================================"
+                echo "🚀 Artifacts are available in Jenkins"
+            """
+        }
+        failure {
+            echo "❌ BKC kernel build failed!"
+            sh """
+                echo ""
+                echo "======================================"
+                echo "         FAILURE ANALYSIS"
+                echo "======================================"
+                
+                if [ -f "${BUILD_DIR}/SPECS/build-err.log" ]; then
+                    echo "📄 Last 50 lines of error log:"
+                    echo "--------------------------------------"
+                    tail -50 ${BUILD_DIR}/SPECS/build-err.log
+                else
+                    echo "⚠️ No error log found"
+                fi
+                
+                echo ""
+                echo "💡 Check the build logs for detailed error information"
+                echo "======================================"
+            """
+        }
+        unstable {
+            echo "⚠️ BKC kernel build completed with warnings!"
+        }
+    }
+}

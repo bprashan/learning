@@ -1,0 +1,608 @@
+# Complete 3-Tier Web Application with Monitoring & Logging
+
+# Namespace for the application
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: webapp
+  labels:
+    app: three-tier-webapp
+---
+# PostgreSQL Database (Data Tier)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-db
+  namespace: webapp
+  labels:
+    app: postgres
+    tier: database
+spec:
+  serviceName: postgres-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+        tier: database
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_DB
+          value: webappdb
+        - name: POSTGRES_USER
+          value: webapp
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - exec pg_isready -U webapp -d webappdb -h 127.0.0.1 -p 5432
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - exec pg_isready -U webapp -d webappdb -h 127.0.0.1 -p 5432
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: standard-rwo
+      resources:
+        requests:
+          storage: 20Gi
+---
+# PostgreSQL Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: webapp
+type: Opaque
+stringData:
+  password: "SecurePassword123"
+---
+# PostgreSQL Services
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: webapp
+  labels:
+    app: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+  namespace: webapp
+  labels:
+    app: postgres
+spec:
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+---
+# Redis Cache
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-cache
+  namespace: webapp
+  labels:
+    app: redis
+    tier: cache
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        tier: cache
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+          name: redis
+        args:
+        - redis-server
+        - --requirepass
+        - $(REDIS_PASSWORD)
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secret
+              key: password
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+# Redis Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-secret
+  namespace: webapp
+type: Opaque
+stringData:
+  password: "RedisPassword123"
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: webapp
+  labels:
+    app: redis
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+    name: redis
+---
+# Backend API (Application Tier)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-api
+  namespace: webapp
+  labels:
+    app: backend-api
+    tier: backend
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: backend-api
+  template:
+    metadata:
+      labels:
+        app: backend-api
+        tier: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      initContainers:
+      - name: db-migration
+        image: postgres:15
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            echo "Running database migrations..."
+            export PGPASSWORD=$POSTGRES_PASSWORD
+            until pg_isready -h postgres-service -p 5432 -U webapp; do
+              echo "Waiting for database..."
+              sleep 2
+            done
+            echo "Database is ready!"
+            # Here you would run actual migrations
+            echo "Migrations completed"
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+      containers:
+      - name: backend-api
+        image: nginx:1.21  # Replace with your actual backend API image
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://webapp:$(POSTGRES_PASSWORD)@postgres-service:5432/webappdb"
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@redis-service:6379"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: ENVIRONMENT
+          value: "production"
+        envFrom:
+        - secretRef:
+            name: postgres-secret
+        - secretRef:
+            name: redis-secret
+        volumeMounts:
+        - name: app-config
+          mountPath: /etc/config
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 5
+          timeoutSeconds: 3
+      volumes:
+      - name: app-config
+        configMap:
+          name: backend-config
+---
+# Backend Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: webapp
+data:
+  app.properties: |
+    server.port=8080
+    management.endpoints.web.exposure.include=health,metrics,prometheus
+    management.endpoint.health.show-details=always
+    
+    # Database configuration
+    spring.datasource.url=postgresql://postgres-service:5432/webappdb
+    spring.datasource.driver-class-name=org.postgresql.Driver
+    spring.jpa.hibernate.ddl-auto=update
+    
+    # Redis configuration
+    spring.redis.host=redis-service
+    spring.redis.port=6379
+    
+    # Logging configuration
+    logging.level.com.webapp=INFO
+    logging.pattern.console=%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n
+---
+# Backend Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: webapp
+  labels:
+    app: backend-api
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+spec:
+  selector:
+    app: backend-api
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http
+  - port: 9090
+    targetPort: 9090
+    name: metrics
+---
+# Frontend Web Application (Presentation Tier)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-web
+  namespace: webapp
+  labels:
+    app: frontend-web
+    tier: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend-web
+  template:
+    metadata:
+      labels:
+        app: frontend-web
+        tier: frontend
+    spec:
+      containers:
+      - name: frontend-web
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+          name: http
+        env:
+        - name: BACKEND_API_URL
+          value: "http://backend-service:8080"
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        - name: web-content
+          mountPath: /usr/share/nginx/html
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      initContainers:
+      - name: setup-content
+        image: busybox:1.35
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            echo "Setting up web content..."
+            cat > /web/index.html << 'EOF'
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>3-Tier Web Application</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 40px; }
+                    .container { max-width: 800px; margin: 0 auto; }
+                    .tier { background: #f5f5f5; padding: 20px; margin: 10px 0; border-radius: 5px; }
+                    .status { color: green; font-weight: bold; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>3-Tier Web Application</h1>
+                    <div class="tier">
+                        <h2>Frontend (Presentation Tier)</h2>
+                        <p class="status">✓ Frontend is running</p>
+                        <p>This is the web interface running on Nginx</p>
+                    </div>
+                    <div class="tier">
+                        <h2>Backend API (Application Tier)</h2>
+                        <p>Backend API URL: <span id="api-url">${BACKEND_API_URL}</span></p>
+                        <button onclick="testAPI()">Test API Connection</button>
+                        <div id="api-result"></div>
+                    </div>
+                    <div class="tier">
+                        <h2>Database (Data Tier)</h2>
+                        <p>PostgreSQL Database with Redis Cache</p>
+                        <button onclick="testDB()">Test Database Connection</button>
+                        <div id="db-result"></div>
+                    </div>
+                </div>
+                <script>
+                    function testAPI() {
+                        document.getElementById('api-result').innerHTML = 'Testing...';
+                        fetch('/api/health')
+                            .then(response => response.text())
+                            .then(data => {
+                                document.getElementById('api-result').innerHTML = 
+                                    '<p class="status">✓ API connection successful</p>';
+                            })
+                            .catch(error => {
+                                document.getElementById('api-result').innerHTML = 
+                                    '<p style="color: red;">✗ API connection failed</p>';
+                            });
+                    }
+                    
+                    function testDB() {
+                        document.getElementById('db-result').innerHTML = 'Testing...';
+                        fetch('/api/db-status')
+                            .then(response => response.text())
+                            .then(data => {
+                                document.getElementById('db-result').innerHTML = 
+                                    '<p class="status">✓ Database connection successful</p>';
+                            })
+                            .catch(error => {
+                                document.getElementById('db-result').innerHTML = 
+                                    '<p style="color: red;">✗ Database connection failed</p>';
+                            });
+                    }
+                </script>
+            </body>
+            </html>
+            EOF
+        volumeMounts:
+        - name: web-content
+          mountPath: /web
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: frontend-config
+      - name: web-content
+        emptyDir: {}
+---
+# Frontend Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-config
+  namespace: webapp
+data:
+  nginx.conf: |
+    user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /var/run/nginx.pid;
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+
+        # Structured JSON logging
+        log_format json_combined escape=json
+        '{'
+          '"time_local":"$time_local",'
+          '"remote_addr":"$remote_addr",'
+          '"request":"$request",'
+          '"status": "$status",'
+          '"body_bytes_sent":"$body_bytes_sent",'
+          '"request_time":"$request_time",'
+          '"http_user_agent":"$http_user_agent"'
+        '}';
+
+        access_log /var/log/nginx/access.log json_combined;
+
+        sendfile on;
+        keepalive_timeout 65;
+        gzip on;
+
+        upstream backend {
+            server backend-service:8080;
+        }
+
+        server {
+            listen 80;
+            server_name localhost;
+
+            location / {
+                root /usr/share/nginx/html;
+                index index.html;
+                try_files $uri $uri/ /index.html;
+            }
+
+            location /api/ {
+                proxy_pass http://backend/;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+        }
+    }
+---
+# Frontend Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: webapp
+  labels:
+    app: frontend-web
+spec:
+  selector:
+    app: frontend-web
+  ports:
+  - port: 80
+    targetPort: 80
+    name: http
+---
+# Ingress for external access
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: webapp-ingress
+  namespace: webapp
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - host: webapp.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-service
+            port:
+              number: 80
+  # If you have a domain, uncomment and configure TLS
+  # tls:
+  # - hosts:
+  #   - webapp.example.com
+  #   secretName: webapp-tls

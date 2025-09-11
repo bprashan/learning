@@ -1,0 +1,122 @@
+# EmptyDir Volume - temporary storage
+apiVersion: v1
+kind: Pod
+metadata:
+  name: emptydir-example
+  labels:
+    app: storage-demo
+spec:
+  containers:
+  - name: writer
+    image: busybox:1.35
+    command: ["/bin/sh"]
+    args:
+      - -c
+      - |
+        while true; do
+          echo "$(date): Writing to shared storage" >> /shared/data.log
+          sleep 10
+        done
+    volumeMounts:
+    - name: shared-storage
+      mountPath: /shared
+  
+  - name: reader
+    image: busybox:1.35
+    command: ["/bin/sh"]
+    args:
+      - -c
+      - |
+        while true; do
+          echo "Reading from shared storage:"
+          tail -n 5 /shared/data.log 2>/dev/null || echo "No data yet"
+          sleep 15
+        done
+    volumeMounts:
+    - name: shared-storage
+      mountPath: /shared
+  
+  volumes:
+  - name: shared-storage
+    emptyDir: {}
+---
+# HostPath Volume - mount host directory (use with caution)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hostpath-example
+  labels:
+    app: storage-demo
+spec:
+  containers:
+  - name: logger
+    image: busybox:1.35
+    command: ["/bin/sh"]
+    args:
+      - -c
+      - |
+        while true; do
+          echo "$(date): Host path log entry" >> /host-logs/app.log
+          sleep 30
+        done
+    volumeMounts:
+    - name: host-logs
+      mountPath: /host-logs
+    securityContext:
+      runAsUser: 0  # Run as root to write to host path
+  
+  volumes:
+  - name: host-logs
+    hostPath:
+      path: /tmp/k8s-logs
+      type: DirectoryOrCreate
+---
+# ConfigMap as Volume
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  app.properties: |
+    server.port=8080
+    database.url=jdbc:mysql://mysql-service:3306/app
+    logging.level=INFO
+  nginx.conf: |
+    server {
+        listen 80;
+        server_name localhost;
+        location / {
+            root /usr/share/nginx/html;
+            index index.html;
+        }
+    }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: configmap-volume-example
+  labels:
+    app: storage-demo
+spec:
+  containers:
+  - name: app
+    image: nginx:1.21
+    ports:
+    - containerPort: 80
+    volumeMounts:
+    - name: config-volume
+      mountPath: /etc/config
+    - name: nginx-config
+      mountPath: /etc/nginx/conf.d
+      subPath: nginx.conf
+  
+  volumes:
+  - name: config-volume
+    configMap:
+      name: app-config
+  - name: nginx-config
+    configMap:
+      name: app-config
+      items:
+      - key: nginx.conf
+        path: default.conf

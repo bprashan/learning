@@ -1,0 +1,99 @@
+# Production-ready deployment with proper revision management
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: production-web-app
+  labels:
+    app: web-app
+    environment: production
+  annotations:
+    # Record deployment commands for better history tracking
+    deployment.kubernetes.io/revision: "1"
+spec:
+  replicas: 5
+  revisionHistoryLimit: 20  # Keep 20 revisions for production
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: web-app
+  template:
+    metadata:
+      labels:
+        app: web-app
+        environment: production
+      annotations:
+        # Track important metadata for rollbacks
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      containers:
+      - name: web-app
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+          name: http
+        - containerPort: 9090
+          name: metrics
+        
+        # Enhanced probes for better rolling update control
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+        
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+          successThreshold: 1
+        
+        # Graceful shutdown configuration
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 15"]
+        
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        
+        env:
+        - name: ENVIRONMENT
+          value: "production"
+        - name: VERSION
+          value: "v1.0.0"
+        - name: DEPLOYMENT_TIME
+          value: "2025-09-23T10:00:00Z"
+      
+      # Improve scheduling for better rolling updates
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - web-app
+              topologyKey: kubernetes.io/hostname
+      
+      terminationGracePeriodSeconds: 30

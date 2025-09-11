@@ -1,0 +1,26 @@
+# Comprehensive revision monitoring commands
+
+# 1. Basic history view
+kubectl rollout history deployment/nginx-deployment
+
+# 2. Detailed view of specific revision
+kubectl rollout history deployment/nginx-deployment --revision=3
+
+# 3. Compare current with previous revision
+kubectl get deployment nginx-deployment -o yaml > current-revision.yaml
+kubectl rollout history deployment/nginx-deployment --revision=1 > previous-revision.yaml
+
+# 4. Check ReplicaSet status (physical revisions)
+kubectl get replicasets -l app=nginx -o wide
+
+# 5. Monitor revision cleanup
+kubectl get events --field-selector reason=ReplicaSetDeleteStarted
+
+# 6. Check revision limit configuration
+kubectl get deployment nginx-deployment -o jsonpath='{.spec.revisionHistoryLimit}'
+
+# 7. Storage usage by revisions
+kubectl get replicasets -l app=nginx -o custom-columns="NAME:.metadata.name,CREATED:.metadata.creationTimestamp,SIZE:.metadata.managedFields[0].size"
+
+# 8. Advanced: Show revision changes
+kubectl diff -f deployment-simple.yaml

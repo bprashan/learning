@@ -1,0 +1,45 @@
+# Multi-container Pod example
+apiVersion: v1
+kind: Pod
+metadata:
+  name: multi-container-pod
+  labels:
+    app: web-app
+    tier: frontend
+spec:
+  containers:
+  # Main application container
+  - name: web-app
+    image: nginx:1.21
+    ports:
+    - containerPort: 80
+    volumeMounts:
+    - name: shared-data
+      mountPath: /usr/share/nginx/html
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "128Mi"
+        cpu: "100m"
+  
+  # Sidecar container for logging
+  - name: log-agent
+    image: busybox:1.35
+    command: ["/bin/sh"]
+    args: ["-c", "while true; do echo $(date) - Checking logs; sleep 30; done"]
+    volumeMounts:
+    - name: shared-data
+      mountPath: /logs
+    resources:
+      requests:
+        memory: "32Mi"
+        cpu: "25m"
+      limits:
+        memory: "64Mi"
+        cpu: "50m"
+  
+  volumes:
+  - name: shared-data
+    emptyDir: {}

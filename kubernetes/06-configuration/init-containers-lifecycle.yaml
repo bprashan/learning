@@ -1,0 +1,272 @@
+# Pod with init containers and lifecycle hooks
+apiVersion: v1
+kind: Pod
+metadata:
+  name: init-lifecycle-example
+  labels:
+    app: init-demo
+spec:
+  # Init containers run before main application containers
+  initContainers:
+  # First init container: Database migration
+  - name: db-migration
+    image: busybox:1.35
+    command: ["/bin/sh"]
+    args:
+      - -c
+      - |
+        echo "Running database migration..."
+        echo "Connecting to database: $DB_HOST"
+        echo "Running migration scripts..."
+        sleep 10
+        echo "Database migration completed successfully"
+    env:
+    - name: DB_HOST
+      valueFrom:
+        configMapKeyRef:
+          name: app-config
+          key: database.host
+    - name: DB_USER
+      valueFrom:
+        secretKeyRef:
+          name: database-secret
+          key: username
+    - name: DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: database-secret
+          key: password
+  
+  # Second init container: Download configuration
+  - name: config-downloader
+    image: busybox:1.35
+    command: ["/bin/sh"]
+    args:
+      - -c
+      - |
+        echo "Downloading configuration files..."
+        echo "Creating application config..."
+        mkdir -p /shared-config
+        echo "server.port=8080" > /shared-config/application.properties
+        echo "spring.profiles.active=production" >> /shared-config/application.properties
+        echo "Configuration files downloaded successfully"
+        ls -la /shared-config/
+    volumeMounts:
+    - name: shared-config
+      mountPath: /shared-config
+  
+  # Third init container: Wait for dependencies
+  - name: dependency-checker
+    image: busybox:1.35
+    command: ["/bin/sh"]
+    args:
+      - -c
+      - |
+        echo "Checking dependencies..."
+        echo "Waiting for database service..."
+        until nc -z mysql-service 3306; do
+          echo "Database not ready, waiting..."
+          sleep 5
+        done
+        echo "Database is ready!"
+        
+        echo "Waiting for Redis service..."
+        until nc -z redis-service 6379; do
+          echo "Redis not ready, waiting..."
+          sleep 3
+        done
+        echo "Redis is ready!"
+        
+        echo "All dependencies are ready!"
+  
+  containers:
+  - name: web-app
+    image: nginx:1.21
+    ports:
+    - containerPort: 80
+    
+    # Lifecycle hooks
+    lifecycle:
+      postStart:
+        exec:
+          command:
+          - /bin/sh
+          - -c
+          - |
+            echo "Container started at $(date)" > /var/log/startup.log
+            echo "Initializing application..."
+            echo "Loading configuration from /etc/config/"
+            echo "Application initialized successfully" >> /var/log/startup.log
+      
+      preStop:
+        exec:
+          command:
+          - /bin/sh
+          - -c
+          - |
+            echo "Container stopping at $(date)" > /var/log/shutdown.log
+            echo "Graceful shutdown initiated..."
+            echo "Closing database connections..."
+            echo "Stopping background tasks..."
+            sleep 10
+            echo "Graceful shutdown completed" >> /var/log/shutdown.log
+    
+    env:
+    - name: APP_CONFIG_PATH
+      value: "/etc/config"
+    - name: SHARED_CONFIG_PATH
+      value: "/shared-config"
+    
+    volumeMounts:
+    - name: config-volume
+      mountPath: /etc/config
+    - name: shared-config
+      mountPath: /shared-config
+      readOnly: true
+    - name: log-volume
+      mountPath: /var/log
+    
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "100m"
+      limits:
+        memory: "256Mi"
+        cpu: "200m"
+  
+  volumes:
+  - name: config-volume
+    configMap:
+      name: app-config
+  - name: shared-config
+    emptyDir: {}
+  - name: log-volume
+    emptyDir: {}
+
+  restartPolicy: Always
+---
+# Deployment with init containers for setup
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-with-init
+  labels:
+    app: web-application
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web-application
+  template:
+    metadata:
+      labels:
+        app: web-application
+    spec:
+      initContainers:
+      # Init container to create initial data
+      - name: data-initializer
+        image: busybox:1.35
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            echo "Initializing application data..."
+            mkdir -p /data/uploads /data/cache /data/logs
+            echo "Welcome to our application!" > /data/welcome.txt
+            echo "$(date): Application data initialized" > /data/init.log
+            chmod -R 755 /data/
+            echo "Data initialization completed"
+        volumeMounts:
+        - name: app-data
+          mountPath: /data
+      
+      # Init container to wait for external services
+      - name: service-waiter
+        image: busybox:1.35
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            echo "Waiting for required services..."
+            
+            # Wait for database
+            echo "Checking database connectivity..."
+            until nc -z mysql-service 3306 2>/dev/null; do
+              echo "Database not available, retrying in 5 seconds..."
+              sleep 5
+            done
+            echo "Database is available!"
+            
+            # Wait for cache service
+            echo "Checking cache service..."
+            until nc -z redis-service 6379 2>/dev/null; do
+              echo "Cache service not available, retrying in 3 seconds..."
+              sleep 3
+            done
+            echo "Cache service is available!"
+            
+            echo "All required services are ready!"
+      
+      containers:
+      - name: application
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+        
+        lifecycle:
+          postStart:
+            httpGet:
+              path: /health
+              port: 80
+              scheme: HTTP
+          
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                echo "Gracefully shutting down..."
+                nginx -s quit
+                sleep 15
+        
+        env:
+        - name: DATA_PATH
+          value: "/app/data"
+        - name: CONFIG_PATH
+          value: "/app/config"
+        
+        volumeMounts:
+        - name: app-data
+          mountPath: /app/data
+        - name: app-config
+          mountPath: /app/config
+        
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      
+      volumes:
+      - name: app-data
+        emptyDir: {}
+      - name: app-config
+        configMap:
+          name: app-config
