@@ -10,6 +10,6 @@
 
 ## Installation
 ```bash
-git clone ${{REPO_URL}}.git
+git clone ${{ github.repository }}.git
 cd ${{REPO_NAME}}
 npm install
